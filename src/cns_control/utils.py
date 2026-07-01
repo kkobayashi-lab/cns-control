@@ -368,7 +368,66 @@ def automated_point_selections(core, viewer, main_window, point_transformer, N, 
             for pt in points[p][cell_slice, :]:
                 sources[0]._points.add([0, p, 0, 0, pt[0], pt[1]])
         return sources, np.arange(len(seq.stage_positions)), seq
-    
+
+def manual_point_selections(core, viewer, main_window, point_transformer, N,
+                            autofocus_object='glass', batch=True):
+    """
+    Set up point-source layers for MANUAL selection (click points by hand).
+
+    Mirrors `automated_point_selections` but does NO imaging, segmentation or
+    point placement -- it only creates the (empty) source layers and returns
+    the same (sources, autofocus_p, new_seq) contract the MDA expects. The user
+    clicks points into the layers afterwards.
+
+    N cells-per-FOV is fixed up front (exactly like automated selection):
+    - batch=True : each stage position is repeated N times to build new_seq,
+      and the user must click N cell points per FOV to match.
+    - batch=False: new_seq is the current sequence unchanged; the user clicks
+      however many points they like per FOV.
+
+    Layers:
+    - autofocus_object None/"None" -> one layer  ('cells').
+    - real focus target           -> two layers ('cells','autofocus').
+
+    Returns
+    -------
+    sources : list[PointsLayerSource]
+    autofocus_p : np.ndarray
+        batch=True  -> first flat index of each FOV's repeated block.
+        batch=False -> every stage-position index.
+    new_seq : MDASequence
+        batch=True  -> positions repeated N times.
+        batch=False -> the current napari sequence, unchanged.
+    """
+    no_autofocus = _is_no_autofocus(autofocus_object)
+
+    seq = get_seq_from_napari(main_window)
+
+    # Create the empty source layers (one or two).
+    if no_autofocus:
+        sources = create_point_sources(
+            viewer, point_transformer, size=15,
+            names=['cells'], colors=['#aa0000ff'],
+        )
+    else:
+        sources = create_point_sources(viewer, point_transformer, size=15)
+
+    if batch:
+        # Repeat every position N times, exactly like the automated batch path.
+        repeats = [N for _ in range(len(seq.stage_positions))]
+        repeated_positions = [
+            pos for pos in seq.stage_positions for _ in range(N)
+        ]
+        new_seq = seq.replace(stage_positions=repeated_positions)
+
+        # Establish the broadcast/position dimensions on the empty layers so
+        # per-position clicks map correctly (automated does this too).
+        core.run_mda(new_seq)
+
+        return sources, np.cumsum([0] + repeats[:-1]), new_seq
+    else:
+        core.run_mda(seq)
+        return sources, np.arange(len(seq.stage_positions)), seq 
 
 def unload(core, N=20):
     n = 0.1  # starting sleep time
