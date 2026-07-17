@@ -429,72 +429,69 @@ def manual_point_selections(core, viewer, main_window, point_transformer, N,
         core.run_mda(seq)
         return sources, np.arange(len(seq.stage_positions)), seq 
     
+
 def grid_point_selections(core, viewer, main_window, point_transformer,
                           fov_x, fov_y,
                           x_range, y_range, x_step, y_step,
-                          repeats=2):
+                          repeats=2, use_blank_images=True):
     """
-    Build a grid of stage positions centered on the CURRENT stage XY, each
-    carrying `repeats` copies of the SAME single fixed point (fov_x, fov_y).
-    No autofocus, non-batch.
-
-    repeats : int >= 2
-        How many identical points to place at (fov_x, fov_y) per position. Must
-        be >= 2 (the DAQ needs at least 2 samples per channel).
-
-    WRITES the freshly-built grid of positions into the napari MDA widget via
-    setValue so napari-micromanager shows bright field during acquisition, then
-    returns the (sources, autofocus_p, new_seq) contract the MDA expects.
+    ...
+    use_blank_images : bool
+        If True (default), skip the slow core.run_mda() pass and instead add a
+        zero-memory black placeholder layer with the same (t,p,c,z,Y,X) dims,
+        just to establish the broadcast/position dims for the points layers.
     """
     repeats = int(repeats)
     if repeats < 2:
         raise ValueError("repeats must be an integer >= 2")
-
     seq = get_seq_from_napari(main_window)
-
-    # Origin = current stage position; grid spans origin +/- range.
     origin_x, origin_y = core.getXYPosition()
     xs = np.arange(origin_x - x_range, origin_x + x_range + x_step / 2.0, x_step)
     ys = np.arange(origin_y - y_range, origin_y + y_range + y_step / 2.0, y_step)
-
-    # Reuse the first napari position as a template so z / other fields carry
-    # over; only x and y are overridden.
     template = seq.stage_positions[0]
     grid_positions = []
     for gx in xs:
         for gy in ys:
             grid_positions.append(template.replace(x=float(gx), y=float(gy)))
-
     new_seq = seq.replace(stage_positions=grid_positions)
-
-    # WRITE the generated positions into the napari MDA widget so the app knows
-    # them and displays bright field.
     try:
         mda_dock = main_window._dock_widgets["MDA"]
         mda_settings = mda_dock.children()[4]
         if hasattr(mda_settings, "setValue"):
             mda_settings.setValue(new_seq)
-            new_seq = get_seq_from_napari(main_window)  # read back the truth
+            new_seq = get_seq_from_napari(main_window)
         else:
             print("[grid setup] MDA widget has no setValue -- BF may not show")
     except Exception as e:
         print(f"[grid setup] couldn't write positions to MDA widget: {e}")
-
-    # One 'cells' layer only (no autofocus).
     sources = create_point_sources(
         viewer, point_transformer, size=15,
         names=['cells'], colors=['#aa0000ff'],
     )
-
-    # Establish broadcast/position dims, then place `repeats` identical points at
-    # (fov_x, fov_y) for every position. Row order (.., y, x) matches the other
-    # selection functions.
-    core.run_mda(new_seq)
-    for p in range(len(new_seq.stage_positions)):
-        for _ in range(repeats):
-            sources[0]._points.add([0, p, 0, 0, fov_y, fov_x])
-
-    return sources, np.arange(len(new_seq.stage_positions)), new_seq
+    n_pos = len(new_seq.stage_positions)
+    if use_blank_images:
+        # Zero-memory placeholder: one black frame broadcast to every position.
+        # Establishes the same (t, p, c, z, Y, X) dims run_mda would.
+        try:
+            img_y = int(core.getImageHeight())
+            img_x = int(core.getImageWidth())
+        except Exception:
+            img_x, img_y = 1344, 1024
+        blank = np.broadcast_to(
+            np.zeros((img_y, img_x), dtype=np.uint16),
+            (1, n_pos, 1, 1, img_y, img_x),
+        )
+        viewer.add_image(blank, name="grid placeholder (blank)")
+    else:
+        core.run_mda(new_seq)
+    # Add all points in one call instead of one .add() per point --
+    # much faster for 2500 x repeats points.
+    pts = np.array(
+        [[0, p, 0, 0, fov_y, fov_x] for p in range(n_pos) for _ in range(repeats)],
+        dtype=float,
+    )
+    sources[0]._points.add(pts)
+    return sources, np.arange(n_pos), new_seq
 
 def unload(core, N=20):
     n = 0.1  # starting sleep time
