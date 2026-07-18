@@ -3,6 +3,7 @@ import xarray as xr
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm.notebook import trange, tqdm
+import json
 import time
 import scipy.ndimage as ndi
 from raman_mda_engine.aiming import (
@@ -384,3 +385,142 @@ class ManualImageSelector:
     def start(self):
         plt.show()
         return self.selected_points
+    
+
+def _vandermonde_terms(pts, degree):
+    """Design matrix with terms x^i * y^j for i + j <= degree.
+ 
+    IMPORTANT: term ordering MUST match _vandermonde_design in
+    raman_mda_engine's utils (graded order: for each total degree d,
+    terms x^i * y^(d-i) with i ascending), because the model C is fit
+    here and applied there. Degree 1 gives [1, y, x] under both orderings,
+    which is why only degree 1 worked before this was aligned.
+    """
+    pts = np.atleast_2d(pts)
+    x, y = pts[:, 0], pts[:, 1]
+    terms = []
+    for total_deg in range(degree + 1):
+        for i in range(total_deg + 1):
+            j = total_deg - i
+            terms.append((x**i) * (y**j))
+    return np.stack(terms, axis=1)
+ 
+ 
+def fit_vandermonde(pts, targets, degree):
+    """Least-squares fit mapping pts (N, 2) -> targets (N, 2)."""
+    A = _vandermonde_terms(pts, degree)
+    C, *_ = np.linalg.lstsq(A, np.atleast_2d(targets), rcond=None)
+    return C
+ 
+ 
+def apply_vandermonde(pts, C, degree):
+    return _vandermonde_terms(pts, degree) @ C
+ 
+ 
+def save_vandermonde_model(json_path, C, degree, img_center=None, xy_center=None):
+    """Save in the format load_vandermonde_model expects.
+ 
+    img_center / xy_center are stored as extra keys for reference
+    (dict-based loaders that only read "degree" and "C" ignore them).
+    """
+    model = {"degree": int(degree), "C": np.asarray(C).tolist()}
+    if img_center is not None:
+        model["img_center"] = np.asarray(img_center).tolist()
+    if xy_center is not None:
+        model["xy_center"] = np.asarray(xy_center).tolist()
+    with open(json_path, "w") as f:
+        json.dump(model, f, indent=2)
+    print(f"Saved Vandermonde model (degree={degree}) to {json_path}")
+ 
+ 
+# ---------------- StagePointPicker ----------------
+ 
+class StagePointPicker:
+    """Frame-by-frame single-point picker (for pixel->stage calibration).
+ 
+    Non-blocking, same usage pattern as ManualImageSelector: construct with
+    plt.ion() active, let the user click through, read .points afterwards.
+ 
+    - Left click: mark/overwrite the point for the current frame
+    - Enter: next frame (closes the window after the last one)
+    - Backspace: previous frame
+    - R: reset current frame to NaN
+    - N: mark current frame NaN and advance
+    - Scroll: zoom; middle-drag: pan (if mpl_interactions is installed)
+ 
+    Attributes
+    ----------
+    points : (n_frames, 2) array of (x, y) pixel coords, NaN where unmarked.
+    """
+ 
+    def __init__(self, imgs, cmap="gray"):
+        self.imgs = np.asarray(imgs)
+        self.n_frames = len(self.imgs)
+        self.points = np.full((self.n_frames, 2), np.nan)
+        self.i = 0
+ 
+        self.fig, self.ax = plt.subplots()
+        self.im = self.ax.imshow(self.imgs[0], cmap=cmap)
+        self.marker, = self.ax.plot(
+            [], [], "r+", markersize=15, markeredgewidth=2
+        )
+        self.title = self.ax.set_title("")
+ 
+        # pan/zoom without breaking left-click marking
+        try:
+            from mpl_interactions import zoom_factory, panhandler
+            self._disconnect_zoom = zoom_factory(self.ax)
+            self._panhandler = panhandler(self.fig, button=2)
+        except ImportError:
+            pass
+ 
+        self.fig.canvas.mpl_connect("button_press_event", self._on_click)
+        self.fig.canvas.mpl_connect("key_press_event", self._on_key)
+        self._draw()
+ 
+    def _draw(self):
+        img = self.imgs[self.i]
+        self.im.set_data(img)
+        self.im.set_clim(img.min(), img.max())
+        if np.isnan(self.points[self.i]).any():
+            self.marker.set_data([], [])
+        else:
+            self.marker.set_data(
+                [self.points[self.i, 0]], [self.points[self.i, 1]]
+            )
+        n_done = int((~np.isnan(self.points).any(axis=1)).sum())
+        self.title.set_text(
+            f"Frame {self.i}/{self.n_frames - 1}  ({n_done} marked)\n"
+            "Click point | Enter next | Backspace prev | R reset | N NaN"
+        )
+        self.fig.canvas.draw_idle()
+ 
+    def _on_click(self, event):
+        if event.inaxes != self.ax or event.button != 1:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+        self.points[self.i] = [event.xdata, event.ydata]
+        self._draw()
+ 
+    def _advance(self):
+        if self.i < self.n_frames - 1:
+            self.i += 1
+            self._draw()
+        else:
+            print("Finished picking.")
+            plt.close(self.fig)
+ 
+    def _on_key(self, event):
+        if event.key == "enter":
+            self._advance()
+        elif event.key == "backspace":
+            if self.i > 0:
+                self.i -= 1
+                self._draw()
+        elif event.key == "r":
+            self.points[self.i] = np.nan
+            self._draw()
+        elif event.key and event.key.lower() == "n":
+            self.points[self.i] = np.nan
+            self._advance()
