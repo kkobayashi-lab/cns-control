@@ -601,21 +601,27 @@ def manual_point_selections(core, viewer, main_window, point_transformer, N,
         core.run_mda(seq)
         return sources, np.arange(len(seq.stage_positions)), seq
 
-
 def grid_point_selections(core, viewer, main_window, point_transformer,
                           fov_x, fov_y,
                           x_range, y_range, x_step, y_step,
-                          repeats=2, use_blank_images=True):
+                          repeats=2, use_blank_images=True,
+                          autofocus_object='None'):
     """
     ...
     use_blank_images : bool
         If True (default), skip the slow core.run_mda() pass and instead add a
         zero-memory black placeholder layer with the same (t,p,c,z,Y,X) dims,
         just to establish the broadcast/position dims for the points layers.
+    autofocus_object : str or None
+        If a real focus target ('glass', 'quartz', 'laser', 'software',
+        'cell'), an 'autofocus' layer is also created with one point per
+        position at the same fixed (fov_y, fov_x). If None/"None", only the
+        'cells' layer is created (original behavior).
     """
     repeats = int(repeats)
     if repeats < 2:
         raise ValueError("repeats must be an integer >= 2")
+    no_autofocus = _is_no_autofocus(autofocus_object)
     seq = get_seq_from_napari(main_window)
     origin_x, origin_y = core.getXYPosition()
     xs = np.arange(origin_x - x_range, origin_x + x_range + x_step / 2.0, x_step)
@@ -636,10 +642,13 @@ def grid_point_selections(core, viewer, main_window, point_transformer,
             print("[grid setup] MDA widget has no setValue -- BF may not show")
     except Exception as e:
         print(f"[grid setup] couldn't write positions to MDA widget: {e}")
-    sources = create_point_sources(
-        viewer, point_transformer, size=15,
-        names=['cells'], colors=['#aa0000ff'],
-    )
+    if no_autofocus:
+        sources = create_point_sources(
+            viewer, point_transformer, size=15,
+            names=['cells'], colors=['#aa0000ff'],
+        )
+    else:
+        sources = create_point_sources(viewer, point_transformer, size=15)
     n_pos = len(new_seq.stage_positions)
     if use_blank_images:
         # Zero-memory placeholder: one black frame broadcast to every position.
@@ -663,8 +672,14 @@ def grid_point_selections(core, viewer, main_window, point_transformer,
         dtype=float,
     )
     sources[0]._points.add(pts)
+    if not no_autofocus:
+        # one autofocus point per position, at the same fixed FOV pixel
+        af_pts = np.array(
+            [[0, p, 0, 0, fov_y, fov_x] for p in range(n_pos)],
+            dtype=float,
+        )
+        sources[1]._points.add(af_pts)
     return sources, np.arange(n_pos), new_seq
-
 
 def unload(core, N=20):
     n = 0.1  # starting sleep time
