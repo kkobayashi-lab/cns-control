@@ -661,12 +661,101 @@ def manual_point_selections(core, viewer, main_window, point_transformer, N,
     else:
         core.run_mda(seq)
         return sources, np.arange(len(seq.stage_positions)), seq
+    
+def center_manual_selections(core, viewer, main_window, point_transformer,
+                             sources, vandermonde_model_path,
+                             autofocus_object='glass', center=None):
+    """
+    Convert hand-clicked cell points into centered stage positions.
 
+    Workflow: run manual_point_selections (batch=False), click your cell
+    points (and one autofocus point per FOV if autofocus is enabled), then
+    call this. Each clicked cell becomes its OWN new stage position, shifted
+    with the Vandermonde model so the cell lands at the image center --
+    exactly like automated center_cell mode, but with hand-picked cells.
+
+    NOTE: only valid after a NON-batch manual selection (batch repeats
+    positions, which breaks the p -> stage-position mapping used here).
+
+    Returns
+    -------
+    sources, autofocus_p, new_seq : same 3-tuple contract as the other
+        selection functions. autofocus_p = np.arange(n_new).
+    """
+    no_autofocus = _is_no_autofocus(autofocus_object)
+    C, degree = load_vandermonde_model(vandermonde_model_path)
+    seq = get_seq_from_napari(main_window)
+    img_y = int(core.getImageHeight())
+    img_x = int(core.getImageWidth())
+    img_center_yx = (
+        np.array([img_y / 2.0, img_x / 2.0]) if center is None
+        else np.array(center)
+    )
+
+    cell_data = np.asarray(sources[0]._points.data)
+    if cell_data.size == 0:
+        raise ValueError("No clicked cell points found -- click points first.")
+    af_data = None
+    if not no_autofocus:
+        if len(sources) < 2 or len(np.asarray(sources[1]._points.data)) == 0:
+            raise ValueError(
+                "Autofocus is enabled but no autofocus points were clicked."
+            )
+        af_data = np.asarray(sources[1]._points.data)
+
+    new_positions = []
+    af_points = []   # raw autofocus pixel point carried to each new position
+    for p in sorted(set(cell_data[:, 1].astype(int))):
+        orig_pos = seq.stage_positions[p]
+        cells_yx = cell_data[cell_data[:, 1].astype(int) == p][:, -2:]
+        if not no_autofocus:
+            af_here = af_data[af_data[:, 1].astype(int) == p]
+            if len(af_here) == 0:
+                raise ValueError(f"No autofocus point clicked at position {p}.")
+            af_yx = af_here[0, -2:]
+        for cell_yx in cells_yx:
+            offset_yx = cell_yx - img_center_yx
+            offset_xy = np.array([offset_yx[1], offset_yx[0]])
+            stage_dx, stage_dy = apply_vandermonde_model(offset_xy, C, degree)
+            print(f"[manual center] p={p}, cell_yx={cell_yx}, "
+                  f"stage_dx={stage_dx:.3f}, stage_dy={stage_dy:.3f}")
+            new_positions.append(orig_pos.replace(
+                x=float(orig_pos.x - stage_dx),
+                y=float(orig_pos.y - stage_dy),
+            ))
+            if not no_autofocus:
+                af_points.append(af_yx)
+
+    new_seq = seq.replace(stage_positions=new_positions)
+    if no_autofocus:
+        new_sources = create_point_sources(
+            viewer, point_transformer, size=15,
+            names=['cells'], colors=['#aa0000ff'],
+        )
+    else:
+        new_sources = create_point_sources(viewer, point_transformer, size=15)
+    core.run_mda(new_seq)
+    for p in range(len(new_positions)):
+        if not no_autofocus:
+            new_sources[1]._points.add(
+                [0, p, 0, 0, af_points[p][0], af_points[p][1]]
+            )
+        new_sources[0]._points.add(
+            [0, p, 0, 0, img_center_yx[0], img_center_yx[1]]
+        )
+        # 2 repeated points at center when the transformer doesn't multiply
+        # (DAQ needs >= 2 samples per channel)
+        if point_transformer.multiplier <= 1:
+            new_sources[0]._points.add(
+                [0, p, 0, 0, img_center_yx[0], img_center_yx[1]]
+            )
+    return new_sources, np.arange(len(new_positions)), new_seq
 
 def grid_point_selections(core, viewer, main_window, point_transformer,
                           fov_x, fov_y,
                           x_range, y_range, x_step, y_step,
-                          repeats=2, preview_channel="BF"):
+                          repeats=2, preview_channel="BF",
+                          autofocus_object='None'):
     """
     Build a grid of stage positions centered on the CURRENT stage XY, each
     carrying `repeats` copies of the SAME single fixed point (fov_x, fov_y).
@@ -683,11 +772,17 @@ def grid_point_selections(core, viewer, main_window, point_transformer,
     Writes the freshly-built grid of positions into the napari MDA widget and
     returns the (sources, autofocus_p, new_seq) contract the MDA expects. The
     returned sequence always keeps its original Raman acquisition channels.
+    autofocus_object : str or None
+        If a real focus target ('glass', 'quartz', 'laser', 'software',
+        'cell'), an 'autofocus' layer is also created with one point per
+        position at the same fixed (fov_y, fov_x). If None/"None", only the
+        'cells' layer is created (original behavior).
     """
     repeats = int(repeats)
     if repeats < 2:
         raise ValueError("repeats must be an integer >= 2")
 
+    no_autofocus = _is_no_autofocus(autofocus_object)
     seq = _get_seq_from_napari(main_window)
 
     # Origin = current stage position; grid spans origin +/- range.
@@ -712,10 +807,13 @@ def grid_point_selections(core, viewer, main_window, point_transformer,
             print("[grid setup] MDA widget has no setValue -- grid may not show")
     except Exception as e:
         print(f"[grid setup] couldn't write positions to MDA widget: {e}")
-    sources = create_point_sources(
-        viewer, point_transformer, size=15,
-        names=['cells'], colors=['#aa0000ff'],
-    )
+    if no_autofocus:
+        sources = create_point_sources(
+            viewer, point_transformer, size=15,
+            names=['cells'], colors=['#aa0000ff'],
+        )
+    else:
+        sources = create_point_sources(viewer, point_transformer, size=15)
 
     # Establish napari's position dimension without changing the sequence that
     # the later Raman MDA consumes. A real channel gets a temporary one-channel
@@ -735,8 +833,14 @@ def grid_point_selections(core, viewer, main_window, point_transformer,
         for _ in range(repeats):
             sources[0]._points.add([0, p, 0, 0, fov_y, fov_x])
 
+    if not no_autofocus:
+        # one autofocus point per position, at the same fixed FOV pixel
+        af_pts = np.array(
+            [[0, p, 0, 0, fov_y, fov_x] for p in range(n_pos)],
+            dtype=float,
+        )
+        sources[1]._points.add(af_pts)
     return sources, np.arange(len(new_seq.stage_positions)), new_seq
-
 def unload(core, N=20):
     n = 0.1  # starting sleep time
     for attempt in range(N):
