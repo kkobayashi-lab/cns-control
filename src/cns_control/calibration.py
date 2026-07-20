@@ -2,7 +2,7 @@ import nidaqmx
 import xarray as xr
 import numpy as np
 import matplotlib.pyplot as plt
-from tqdm.notebook import trange, tqdm
+from tqdm import trange, tqdm
 import time
 import scipy.ndimage as ndi
 from raman_mda_engine.aiming import (
@@ -138,7 +138,7 @@ class Calibrator:
         """
         self.daq.galvo.stop()
         self.core.setConfig("Channel", "RM")
-        self.core.setShutterOpen("Fluoshutter", True)
+        # self.core.setShutterOpen("Fluoshutter", True)
 
         width = self.core.getImageWidth()
         height = self.core.getImageHeight()
@@ -159,7 +159,7 @@ class Calibrator:
             thres=thres,
         )
 
-        self.core.setShutterOpen("Fluoshutter", False)
+        # self.core.setShutterOpen("Fluoshutter", False)
 
         if plot:
             plt.figure()
@@ -374,7 +374,12 @@ class ManualImageSelector:
         elif event.key.lower() == 'n':  # Mark as NaN
             self.manual_selections[self.current_idx] = True
             self.selected_points[self.current_idx] = (np.nan, np.nan)
-            self.show_image()
+            if self.current_idx < self.num_images - 1:
+                self.current_idx += 1
+                self.show_image()
+            else:
+                print("Finished selection.")
+                plt.close()
 
     def start(self):
         plt.show()

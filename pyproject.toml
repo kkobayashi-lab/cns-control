@@ -24,7 +24,29 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
-dependencies = []
+dependencies = [
+  "matplotlib",
+  "numpy",
+  "scikit-image",
+  "scikit-learn",
+  "scipy",
+  "tqdm",
+  "xarray",
+]
+
+[project.optional-dependencies]
+napari = [
+  "napari",
+  "napari-broadcastable-points>=0.2.0",
+  "raman-mda-engine",
+]
+hardware = [
+  "nidaqmx",
+  "pymmcore-plus",
+]
+tracking = [
+  "raman-mda-engine[tracking]",
+]
 
 [project.urls]
 Documentation = "https://github.com/JasonYu1/cns_control#readme"

@@ -1,21 +1,72 @@
 import numpy as np
-import napari
 from skimage.draw import disk
-from napari_broadcastable_points import BroadcastablePoints
-from raman_mda_engine.aiming import PointsLayerSource
-from raman_mda_engine.utils import get_seq_from_napari
 from scipy.ndimage import center_of_mass
 from tqdm.auto import tqdm
 import time
-from raman_mda_engine.aiming.autotracking import segment_single_img
 from scipy.ndimage import distance_transform_edt
-
-import numpy as np
-from skimage.draw import disk
 
 
 # Values that mean "do not use an autofocus object / layer".
 _NO_AUTOFOCUS = (None, "None", "none", "")
+_GRID_PLACEHOLDER_LAYER = "Grid position placeholders"
+
+
+def _remove_grid_placeholder(viewer):
+    """Remove the grid placeholder layer if a previous Raman grid created it."""
+    try:
+        layer = viewer.layers[_GRID_PLACEHOLDER_LAYER]
+    except (KeyError, TypeError):
+        return
+    viewer.layers.remove(layer)
+
+
+def _set_grid_placeholder(viewer, n_positions):
+    """Create or update a tiny hidden 6-D layer that exposes the position axis."""
+    data = np.zeros((1, n_positions, 1, 1, 1, 1), dtype=np.uint8)
+    try:
+        layer = viewer.layers[_GRID_PLACEHOLDER_LAYER]
+    except (KeyError, TypeError):
+        return viewer.add_image(
+            data,
+            name=_GRID_PLACEHOLDER_LAYER,
+            visible=False,
+        )
+
+    layer.data = data
+    layer.visible = False
+    return layer
+
+
+def _grid_preview_sequence(sequence, preview_channel):
+    """Return a one-channel preview sequence without modifying the Raman plan."""
+    if sequence.channels:
+        channel = sequence.channels[0].replace(config=preview_channel)
+    else:
+        from useq import Channel
+
+        channel = Channel(config=preview_channel)
+    return sequence.replace(channels=(channel,))
+
+
+def _get_seq_from_napari(main_window):
+    """Import the napari-MDA adapter only when a sequence is requested."""
+    from raman_mda_engine.utils import get_seq_from_napari
+
+    return get_seq_from_napari(main_window)
+
+
+def _get_mda_widget_from_napari(main_window):
+    """Import the napari-MDA widget adapter only when it is needed."""
+    from raman_mda_engine.utils import get_mda_widget_from_napari
+
+    return get_mda_widget_from_napari(main_window)
+
+
+def _segment_single_img(image, *, scale):
+    """Load the optional Cellpose stack only for automated segmentation."""
+    from raman_mda_engine.aiming.autotracking import segment_single_img
+
+    return segment_single_img(image, scale=scale)
 
 
 def _is_no_autofocus(autofocus_object) -> bool:
@@ -115,6 +166,12 @@ def create_point_sources(viewer,
     list of PointsLayerSource
         A list of `PointsLayerSource` objects, each corresponding to a created point layer.
     """
+    # These imports initialize napari's layer stack. Keep them out of module
+    # scope so lightweight helpers (for example ``filter_mean``) remain usable
+    # without importing napari, the MDA engine, Cellpose, or PyTorch.
+    from napari_broadcastable_points import BroadcastablePoints
+    from raman_mda_engine.aiming import PointsLayerSource
+
     sources = []
     for name, color in zip(names, colors):
         points = BroadcastablePoints(
@@ -180,7 +237,7 @@ def set_up_new_seq(main_window, point_transformer, engine, seq=None, total_expos
         raise ValueError('Minimal exposure time per Raman collection is 0.0738s')
     
     if seq is None:
-        seq = get_seq_from_napari(main_window)
+        seq = _get_seq_from_napari(main_window)
     new_meta = dict(seq.metadata)
     num_z = seq.z_plan.num_positions()
     # add in raman metadata to do raman
@@ -303,7 +360,7 @@ def automated_point_selections(core, viewer, main_window, point_transformer, N, 
     # In that case we also skip creating the 'autofocus' point layer.
     no_autofocus = _is_no_autofocus(autofocus_object)
 
-    seq = get_seq_from_napari(main_window)
+    seq = _get_seq_from_napari(main_window)
     images = []
     masks = []
     points = []
@@ -317,7 +374,7 @@ def automated_point_selections(core, viewer, main_window, point_transformer, N, 
         core.waitForSystem()
         time.sleep(1)
         images.append(image)
-        mask = segment_single_img(image, scale=1)
+        mask = _segment_single_img(image, scale=1)
         masks.append(mask)
         points.append(get_n_most_centered_coms(mask, N=N, center=center, radius=radius, autofocus_object=autofocus_object, bkd_threshold=bkd_thres))
     images = np.array(images)
@@ -401,7 +458,7 @@ def manual_point_selections(core, viewer, main_window, point_transformer, N,
     """
     no_autofocus = _is_no_autofocus(autofocus_object)
 
-    seq = get_seq_from_napari(main_window)
+    seq = _get_seq_from_napari(main_window)
 
     # Create the empty source layers (one or two).
     if no_autofocus:
@@ -432,7 +489,7 @@ def manual_point_selections(core, viewer, main_window, point_transformer, N,
 def grid_point_selections(core, viewer, main_window, point_transformer,
                           fov_x, fov_y,
                           x_range, y_range, x_step, y_step,
-                          repeats=2):
+                          repeats=2, preview_channel="BF"):
     """
     Build a grid of stage positions centered on the CURRENT stage XY, each
     carrying `repeats` copies of the SAME single fixed point (fov_x, fov_y).
@@ -442,15 +499,19 @@ def grid_point_selections(core, viewer, main_window, point_transformer,
         How many identical points to place at (fov_x, fov_y) per position. Must
         be >= 2 (the DAQ needs at least 2 samples per channel).
 
-    WRITES the freshly-built grid of positions into the napari MDA widget via
-    setValue so napari-micromanager shows bright field during acquisition, then
-    returns the (sources, autofocus_p, new_seq) contract the MDA expects.
+    ``preview_channel`` selects the channel used to image the grid before Raman.
+    Passing ``None`` skips hardware acquisition and creates a hidden placeholder
+    layer that establishes napari's position axis instead.
+
+    Writes the freshly-built grid of positions into the napari MDA widget and
+    returns the (sources, autofocus_p, new_seq) contract the MDA expects. The
+    returned sequence always keeps its original Raman acquisition channels.
     """
     repeats = int(repeats)
     if repeats < 2:
         raise ValueError("repeats must be an integer >= 2")
 
-    seq = get_seq_from_napari(main_window)
+    seq = _get_seq_from_napari(main_window)
 
     # Origin = current stage position; grid spans origin +/- range.
     origin_x, origin_y = core.getXYPosition()
@@ -467,16 +528,15 @@ def grid_point_selections(core, viewer, main_window, point_transformer,
 
     new_seq = seq.replace(stage_positions=grid_positions)
 
-    # WRITE the generated positions into the napari MDA widget so the app knows
-    # them and displays bright field.
+    # Write the generated positions into the napari MDA widget so the later
+    # Raman MDA uses the same grid regardless of the preview mode.
     try:
-        mda_dock = main_window._dock_widgets["MDA"]
-        mda_settings = mda_dock.children()[4]
+        mda_settings = _get_mda_widget_from_napari(main_window)
         if hasattr(mda_settings, "setValue"):
             mda_settings.setValue(new_seq)
-            new_seq = get_seq_from_napari(main_window)  # read back the truth
+            new_seq = _get_seq_from_napari(main_window)  # read back the truth
         else:
-            print("[grid setup] MDA widget has no setValue -- BF may not show")
+            print("[grid setup] MDA widget has no setValue -- grid may not show")
     except Exception as e:
         print(f"[grid setup] couldn't write positions to MDA widget: {e}")
 
@@ -486,10 +546,20 @@ def grid_point_selections(core, viewer, main_window, point_transformer,
         names=['cells'], colors=['#aa0000ff'],
     )
 
-    # Establish broadcast/position dims, then place `repeats` identical points at
-    # (fov_x, fov_y) for every position. Row order (.., y, x) matches the other
-    # selection functions.
-    core.run_mda(new_seq)
+    # Establish napari's position dimension without changing the sequence that
+    # the later Raman MDA consumes. A real channel gets a temporary one-channel
+    # preview sequence; Raman mode gets a tiny hidden placeholder layer.
+    if preview_channel is None:
+        _set_grid_placeholder(viewer, len(new_seq.stage_positions))
+        print("[grid setup] grid ready using Raman placeholders")
+    else:
+        _remove_grid_placeholder(viewer)
+        preview_seq = _grid_preview_sequence(new_seq, preview_channel)
+        core.run_mda(preview_seq)
+        print(f"[grid setup] grid ready after {preview_channel} preview")
+
+    # Place `repeats` identical points at (fov_x, fov_y) for every position.
+    # Row order (.., y, x) matches the other selection functions.
     for p in range(len(new_seq.stage_positions)):
         for _ in range(repeats):
             sources[0]._points.add([0, p, 0, 0, fov_y, fov_x])

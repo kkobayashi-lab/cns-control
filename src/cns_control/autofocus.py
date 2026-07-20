@@ -2,7 +2,7 @@ import numpy as np
 from pymmcore_plus import CMMCorePlus
 import time
 from tqdm.auto import tqdm
-from raman_control.andor import AndorSpectraCollector
+# from raman_control.andor import AndorSpectraCollector
 from scipy.optimize import curve_fit
 from scipy.interpolate import interp1d
 import matplotlib.pyplot as plt
@@ -25,7 +25,7 @@ def autofocus_w_bkd(core, daq, collector, volts, search_range=20, search_pts=15,
 
     daq.galvo.stop()
     core.setConfig("Channel", "RM")
-    core.setShutterOpen("Fluoshutter", True)
+    # core.setShutterOpen("Fluoshutter", True)
     coarse_Z = np.linspace(-search_range, search_range, search_pts)
     coarse_raman = []
     all_raman = []
@@ -39,7 +39,7 @@ def autofocus_w_bkd(core, daq, collector, volts, search_range=20, search_pts=15,
     coarse_raman = np.asarray(coarse_raman)
     all_raman = np.asarray(all_raman)
 
-    core.setShutterOpen("Fluoshutter", False)
+    # core.setShutterOpen("Fluoshutter", False)
     return focusZ, coarse_raman, all_raman
 
 # def autofocus_w_bkd(core, daq, collector, volts, start=1004, end=1030, search_range=20, search_pts=15, exposure=1000, plot=True):
