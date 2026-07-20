@@ -22,7 +22,6 @@ def remove_outlier(data):
 def autofocus_w_bkd(core, daq, collector, volts, search_range=20, search_pts=15, exposure=1000):
     focusZ = core.getPosition()
     core.stopSequenceAcquisition()
-
     daq.galvo.stop()
     core.setConfig("Channel", "RM")
     # core.setShutterOpen("Fluoshutter", True)
