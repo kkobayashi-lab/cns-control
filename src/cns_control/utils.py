@@ -412,7 +412,7 @@ def automated_point_selections(
         core.waitForSystem()
         time.sleep(1)
         images.append(image)
-        mask = segment_single_img(image, scale=1, cellpose_model=cellpose_model)
+        mask = segment_single_img(image, scale=1, cellpose_model=cellpose_model, circle_center=center, circle_radius=radius)
         masks.append(mask)
 
         if center_cell:
