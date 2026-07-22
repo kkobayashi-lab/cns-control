@@ -137,7 +137,10 @@ def grid_setup(monkeypatch):
     return core, viewer, main_window, original_channels
 
 
-def run_grid(grid_setup, *, preview_channel, x_range=1.0):
+def run_grid(
+    grid_setup, *, preview_channel, use_placeholder=False, x_range=1.0,
+    corner_positions=None, x_count=None, y_count=None,
+):
     core, viewer, main_window, _channels = grid_setup
     return utils.grid_point_selections(
         core,
@@ -152,14 +155,110 @@ def run_grid(grid_setup, *, preview_channel, x_range=1.0):
         y_step=1.0,
         repeats=2,
         preview_channel=preview_channel,
+        use_placeholder=use_placeholder,
+        corner_positions=corner_positions,
+        x_count=x_count,
+        y_count=y_count,
     )
+
+
+def test_centered_grid_still_uses_current_stage_xy(grid_setup):
+    _sources, _autofocus_p, sequence = run_grid(
+        grid_setup, preview_channel=None
+    )
+
+    assert [(p.x, p.y) for p in sequence.stage_positions] == [
+        (9.0, 20.0), (10.0, 20.0), (11.0, 20.0)
+    ]
+
+
+def test_corner_grid_normalizes_opposite_corner_directions(grid_setup):
+    _sources, autofocus_p, sequence = run_grid(
+        grid_setup,
+        preview_channel=None,
+        corner_positions=((12.0, 21.0), (10.0, 19.0)),
+    )
+
+    assert [(p.x, p.y) for p in sequence.stage_positions] == [
+        (10.0, 19.0), (10.0, 20.0), (10.0, 21.0),
+        (11.0, 19.0), (11.0, 20.0), (11.0, 21.0),
+        (12.0, 19.0), (12.0, 20.0), (12.0, 21.0),
+    ]
+    np.testing.assert_array_equal(autofocus_p, np.arange(9))
+
+
+def test_corner_grid_rejects_invalid_positions(grid_setup):
+    with pytest.raises(ValueError, match="two finite"):
+        run_grid(
+            grid_setup,
+            preview_channel=None,
+            corner_positions=((1.0, 2.0), (np.nan, 4.0)),
+        )
+
+
+def test_grid_axis_includes_both_bounds_without_exceeding_max_step():
+    axis = utils._grid_axis(0.0, 10.0, 6.0)
+
+    np.testing.assert_allclose(axis, [0.0, 5.0, 10.0])
+
+
+def test_grid_axis_uses_exact_point_count_including_endpoints():
+    axis = utils._grid_axis(0.0, 10.0, count=6)
+
+    np.testing.assert_allclose(axis, [0.0, 2.0, 4.0, 6.0, 8.0, 10.0])
+
+
+def test_corner_grid_uses_requested_xy_point_counts(grid_setup):
+    _sources, autofocus_p, sequence = run_grid(
+        grid_setup,
+        preview_channel=None,
+        corner_positions=((10.0, 19.0), (12.0, 21.0)),
+        x_count=2,
+        y_count=5,
+    )
+
+    assert len(sequence.stage_positions) == 10
+    assert sorted({position.x for position in sequence.stage_positions}) == [
+        10.0, 12.0
+    ]
+    assert sorted({position.y for position in sequence.stage_positions}) == [
+        19.0, 19.5, 20.0, 20.5, 21.0
+    ]
+    np.testing.assert_array_equal(autofocus_p, np.arange(10))
+
+
+def test_grid_rejects_only_one_axis_count(grid_setup):
+    with pytest.raises(ValueError, match="provided together"):
+        run_grid(
+            grid_setup,
+            preview_channel=None,
+            x_count=3,
+        )
+
+
+def test_raman_grid_without_placeholder_runs_prescan(grid_setup):
+    core, viewer, _main_window, original_channels = grid_setup
+    run_grid(grid_setup, preview_channel=None, use_placeholder=True)
+
+    sources, autofocus_p, sequence = run_grid(
+        grid_setup, preview_channel=None
+    )
+
+    assert core.run_calls == [sequence]
+    with pytest.raises(KeyError):
+        viewer.layers[utils._GRID_PLACEHOLDER_LAYER]
+    assert sequence.channels == original_channels
+    np.testing.assert_array_equal(autofocus_p, np.arange(3))
+    assert len(sources[0]._points.data) == 6
+    assert [point[1] for point in sources[0]._points.data] == [0, 0, 1, 1, 2, 2]
+    assert all(point[-2:] == [222, 111] for point in sources[0]._points.data)
 
 
 def test_raman_grid_uses_placeholders_without_running_mda(grid_setup):
     core, viewer, _main_window, original_channels = grid_setup
 
-    sources, autofocus_p, sequence = run_grid(
-        grid_setup, preview_channel=None
+    _sources, _autofocus_p, sequence = run_grid(
+        grid_setup, preview_channel=None, use_placeholder=True
     )
 
     assert core.run_calls == []
@@ -169,17 +268,18 @@ def test_raman_grid_uses_placeholders_without_running_mda(grid_setup):
     assert placeholder.visible is False
     assert viewer.add_image_calls == 1
     assert sequence.channels == original_channels
-    np.testing.assert_array_equal(autofocus_p, np.arange(3))
-    assert len(sources[0]._points.data) == 6
-    assert [point[1] for point in sources[0]._points.data] == [0, 0, 1, 1, 2, 2]
-    assert all(point[-2:] == [222, 111] for point in sources[0]._points.data)
 
 
 def test_raman_grid_updates_existing_placeholder(grid_setup):
     _core, viewer, _main_window, _channels = grid_setup
-    run_grid(grid_setup, preview_channel=None)
+    run_grid(grid_setup, preview_channel=None, use_placeholder=True)
 
-    run_grid(grid_setup, preview_channel=None, x_range=2.0)
+    run_grid(
+        grid_setup,
+        preview_channel=None,
+        use_placeholder=True,
+        x_range=2.0,
+    )
 
     placeholder = viewer.layers[utils._GRID_PLACEHOLDER_LAYER]
     assert placeholder.data.shape == (1, 5, 1, 1, 1, 1)
@@ -188,7 +288,7 @@ def test_raman_grid_updates_existing_placeholder(grid_setup):
 
 def test_real_channel_previews_once_and_preserves_raman_channels(grid_setup):
     core, viewer, _main_window, original_channels = grid_setup
-    run_grid(grid_setup, preview_channel=None)
+    run_grid(grid_setup, preview_channel=None, use_placeholder=True)
 
     _sources, _autofocus_p, sequence = run_grid(
         grid_setup, preview_channel="GFP"

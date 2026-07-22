@@ -14,6 +14,27 @@ _NO_AUTOFOCUS = (None, "None", "none", "")
 _GRID_PLACEHOLDER_LAYER = "Grid position placeholders"
 
 
+def _grid_axis(start, stop, max_step=None, count=None):
+    """Return an axis defined by maximum spacing or an exact point count."""
+    if count is not None:
+        count = int(count)
+        if count < 1:
+            raise ValueError("grid point count must be at least 1")
+        if count == 1:
+            return np.array([(start + stop) / 2.0], dtype=float)
+        return np.linspace(start, stop, count)
+
+    if max_step is None:
+        raise ValueError("max_step is required when count is not provided")
+    if max_step <= 0:
+        raise ValueError("grid step must be greater than zero")
+    span = stop - start
+    if span == 0:
+        return np.array([start], dtype=float)
+    count = int(np.ceil(span / max_step)) + 1
+    return np.linspace(start, stop, count)
+
+
 def _remove_grid_placeholder(viewer):
     """Remove the grid placeholder layer if a previous Raman grid created it."""
     try:
@@ -755,19 +776,31 @@ def grid_point_selections(core, viewer, main_window, point_transformer,
                           fov_x, fov_y,
                           x_range, y_range, x_step, y_step,
                           repeats=2, preview_channel="BF",
-                          autofocus_object='None'):
+                          use_placeholder=False,
+                          autofocus_object='None',
+                          corner_positions=None,
+                          x_count=None, y_count=None):
     """
-    Build a grid of stage positions centered on the CURRENT stage XY, each
-    carrying `repeats` copies of the SAME single fixed point (fov_x, fov_y).
-    No autofocus, non-batch.
+    Build a grid of stage positions, each carrying `repeats` copies of the
+    SAME single fixed point (fov_x, fov_y). By default the grid is centered on
+    the current stage XY. Pass two corner positions to define explicit bounds.
 
     repeats : int >= 2
         How many identical points to place at (fov_x, fov_y) per position. Must
         be >= 2 (the DAQ needs at least 2 samples per channel).
 
     ``preview_channel`` selects the channel used to image the grid before Raman.
-    Passing ``None`` skips hardware acquisition and creates a hidden placeholder
-    layer that establishes napari's position axis instead.
+    Passing ``None`` runs the sequence's normal pre-scan. If ``use_placeholder``
+    is true, that pre-scan is skipped and a hidden placeholder layer establishes
+    napari's position axis instead.
+
+    corner_positions : ((x1, y1), (x2, y2)) or None
+        Opposite stage-space corners of the grid. Coordinate order is
+        normalized, so either physical corner may contain the larger X or Y.
+        When None, the current stage XY and the X/Y half-ranges are used.
+    x_count, y_count : int or None
+        Exact numbers of grid positions along X and Y, including endpoints.
+        When omitted, ``x_step`` and ``y_step`` are treated as maximum spacing.
 
     Writes the freshly-built grid of positions into the napari MDA widget and
     returns the (sources, autofocus_p, new_seq) contract the MDA expects. The
@@ -785,10 +818,23 @@ def grid_point_selections(core, viewer, main_window, point_transformer,
     no_autofocus = _is_no_autofocus(autofocus_object)
     seq = _get_seq_from_napari(main_window)
 
-    # Origin = current stage position; grid spans origin +/- range.
-    origin_x, origin_y = core.getXYPosition()
-    xs = np.arange(origin_x - x_range, origin_x + x_range + x_step / 2.0, x_step)
-    ys = np.arange(origin_y - y_range, origin_y + y_range + y_step / 2.0, y_step)
+    if corner_positions is None:
+        origin_x, origin_y = core.getXYPosition()
+        x_min, x_max = origin_x - x_range, origin_x + x_range
+        y_min, y_max = origin_y - y_range, origin_y + y_range
+    else:
+        corners = np.asarray(corner_positions, dtype=float)
+        if corners.shape != (2, 2) or not np.all(np.isfinite(corners)):
+            raise ValueError(
+                "corner_positions must contain two finite (x, y) positions"
+            )
+        x_min, x_max = np.sort(corners[:, 0])
+        y_min, y_max = np.sort(corners[:, 1])
+
+    if (x_count is None) != (y_count is None):
+        raise ValueError("x_count and y_count must be provided together")
+    xs = _grid_axis(x_min, x_max, x_step, x_count)
+    ys = _grid_axis(y_min, y_max, y_step, y_count)
     template = seq.stage_positions[0]
     grid_positions = []
     for gx in xs:
@@ -817,10 +863,15 @@ def grid_point_selections(core, viewer, main_window, point_transformer,
 
     # Establish napari's position dimension without changing the sequence that
     # the later Raman MDA consumes. A real channel gets a temporary one-channel
-    # preview sequence; Raman mode gets a tiny hidden placeholder layer.
-    if preview_channel is None:
+    # preview sequence; Raman mode either runs the original sequence or uses a
+    # tiny hidden placeholder layer instead.
+    if preview_channel is None and use_placeholder:
         _set_grid_placeholder(viewer, len(new_seq.stage_positions))
         print("[grid setup] grid ready using Raman placeholders")
+    elif preview_channel is None:
+        _remove_grid_placeholder(viewer)
+        core.run_mda(new_seq)
+        print("[grid setup] grid ready after Raman pre-scan")
     else:
         _remove_grid_placeholder(viewer)
         preview_seq = _grid_preview_sequence(new_seq, preview_channel)
