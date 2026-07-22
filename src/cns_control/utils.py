@@ -473,7 +473,7 @@ def automated_point_selections(
         core.waitForSystem()
         time.sleep(1)
         images.append(image)
-        mask = segment_single_img(image, scale=1, cellpose_model=cellpose_model)
+        mask = segment_single_img(image, scale=1, cellpose_model=cellpose_model, circle_center=center, circle_radius = radius)
         masks.append(mask)
 
         if center_cell:
@@ -684,7 +684,7 @@ def center_manual_selections(core, viewer, main_window, point_transformer,
     """
     no_autofocus = _is_no_autofocus(autofocus_object)
     C, degree = load_vandermonde_model(vandermonde_model_path)
-    seq = get_seq_from_napari(main_window)
+    seq = _get_seq_from_napari(main_window)
     img_y = int(core.getImageHeight())
     img_x = int(core.getImageWidth())
     img_center_yx = (
@@ -832,8 +832,8 @@ def grid_point_selections(core, viewer, main_window, point_transformer,
     for p in range(len(new_seq.stage_positions)):
         for _ in range(repeats):
             sources[0]._points.add([0, p, 0, 0, fov_y, fov_x])
-
     if not no_autofocus:
+        n_pos = len(new_seq.stage_positions)
         # one autofocus point per position, at the same fixed FOV pixel
         af_pts = np.array(
             [[0, p, 0, 0, fov_y, fov_x] for p in range(n_pos)],
